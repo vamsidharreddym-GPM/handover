@@ -521,6 +521,8 @@ function toLocalInput(d) {
 const PRESETS = [
   { icon: '🛒', title: 'Pick up groceries', label: 'What to buy', hint: '2 packets milk, 1 kg tomatoes, coriander, 6 eggs' },
   { icon: '🍱', title: 'Order food, I’ll be late', label: 'What to order', hint: 'Dinner for 3 from the usual place. I’ll be home by 10.' },
+  { icon: '🍳', title: 'Cook for yourselves, I’ll be late', label: 'What to make', hint: 'Dal and rice. Rice is in the steel dabba, cooker on 3 whistles.' },
+  { icon: '🛍️', title: 'Get items on the way home', label: 'What to get', hint: 'Bread, 1 litre milk, curd from the corner shop' },
   { icon: '🧺', title: 'Put clothes in the washing machine', label: 'How', hint: 'Whites separately. Quick wash. Detergent is on the top shelf.' },
   { icon: '👕', title: 'Dry the clothes', label: 'How', hint: 'Towels on the balcony line, shirts on hangers.' },
   { icon: '👔', title: 'Iron the clothes', label: 'Which clothes', hint: 'Office shirts for tomorrow, school uniform.' },
