@@ -45,6 +45,16 @@ create table if not exists public.tasks (
   updated_at    timestamptz not null default now()
 );
 
+-- Added after the first user feedback (23 Oct): relation labels, voice notes,
+-- photo when done, and her note or send-back on a task.
+alter table public.members add column if not exists relation text check (char_length(relation) <= 20);
+alter table public.tasks add column if not exists audio_url text check (char_length(audio_url) <= 500);
+alter table public.tasks add column if not exists needs_photo boolean not null default false;
+alter table public.tasks add column if not exists done_photo_url text check (char_length(done_photo_url) <= 500);
+alter table public.tasks add column if not exists owner_note text check (char_length(owner_note) <= 300);
+alter table public.tasks add column if not exists owner_note_at timestamptz;
+alter table public.tasks add column if not exists sent_back_count int not null default 0;
+
 create index if not exists tasks_household_idx on public.tasks (household_id, status, due_at);
 create index if not exists tasks_member_idx on public.tasks (member_id, status);
 create index if not exists members_household_idx on public.members (household_id);
@@ -172,8 +182,9 @@ begin
     'tasks', coalesce((
       select json_agg(t order by (t.status <> 'open'), t.due_at)
       from (
-        select id, title, how_to, where_is, photo_url, due_at, first_due_at,
-               status, member_note, done_at
+        select id, title, how_to, where_is, photo_url, audio_url, due_at, first_due_at,
+               status, member_note, done_at, needs_photo, done_photo_url,
+               owner_note, owner_note_at, sent_back_count
         from public.tasks
         where member_id = m.id
           and (status in ('open','cant')
@@ -183,8 +194,11 @@ begin
   return result;
 end $$;
 
+drop function if exists public.update_my_task(uuid, text, text, int);
+
 create or replace function public.update_my_task(
-  p_task_id uuid, p_action text, p_note text default null, p_minutes int default null
+  p_task_id uuid, p_action text, p_note text default null, p_minutes int default null,
+  p_photo_url text default null
 ) returns void
 language plpgsql security definer set search_path = public as $$
 declare
@@ -203,14 +217,23 @@ begin
   end if;
 
   if p_action = 'done' then
+    if t.status <> 'open' then
+      raise exception 'This task is not open';
+    end if;
+    if p_photo_url is not null and (p_photo_url !~ '^https://' or char_length(p_photo_url) > 500) then
+      raise exception 'That photo link is not valid';
+    end if;
+    if t.needs_photo and p_photo_url is null then
+      raise exception 'Add a photo of the finished task';
+    end if;
     update public.tasks
-      set status = 'done', done_at = now(), done_by = 'member'
+      set status = 'done', done_at = now(), done_by = 'member', done_photo_url = p_photo_url
       where id = t.id;
   elsif p_action = 'undo' then
     if t.status <> 'done' or t.done_at < now() - interval '15 minutes' then
       raise exception 'This can no longer be undone';
     end if;
-    update public.tasks set status = 'open', done_at = null, done_by = null where id = t.id;
+    update public.tasks set status = 'open', done_at = null, done_by = null, done_photo_url = null where id = t.id;
   elsif p_action = 'late' then
     if p_minutes is null or p_minutes < 15 or p_minutes > 480 then
       raise exception 'Pick a time between 15 minutes and 8 hours';
@@ -238,14 +261,14 @@ end $$;
 revoke all on function public.invite_info(uuid) from public;
 revoke all on function public.accept_invite(uuid) from public;
 revoke all on function public.my_tasks() from public;
-revoke all on function public.update_my_task(uuid, text, text, int) from public;
+revoke all on function public.update_my_task(uuid, text, text, int, text) from public;
 grant execute on function public.invite_info(uuid) to anon, authenticated;
 grant execute on function public.accept_invite(uuid) to authenticated;
 grant execute on function public.my_tasks() to authenticated;
-grant execute on function public.update_my_task(uuid, text, text, int) to authenticated;
+grant execute on function public.update_my_task(uuid, text, text, int, text) to authenticated;
 
--- Photos of where things are kept. Public bucket, file names are random.
--- Only a signed-in account holder can upload, and only into her own folder.
+-- Photos and voice notes. Public bucket, file names are random.
+-- Any signed-in person can upload, but only into their own folder.
 do $$
 begin
   if exists (select 1 from information_schema.schemata where schema_name = 'storage') then

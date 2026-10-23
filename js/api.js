@@ -51,14 +51,14 @@ export const api = {
 
   async members() {
     return check(await sb.from('members')
-      .select('id, name, token, user_id, joined_at, last_opened_at, created_at')
+      .select('id, name, relation, token, user_id, joined_at, last_opened_at, created_at')
       .order('created_at'));
   },
 
-  async addMember(householdId, name) {
+  async addMember(householdId, name, relation = null) {
     return check(await sb.from('members')
-      .insert({ household_id: householdId, name })
-      .select('id, name, token, user_id, joined_at, last_opened_at, created_at').single());
+      .insert({ household_id: householdId, name, relation })
+      .select('id, name, relation, token, user_id, joined_at, last_opened_at, created_at').single());
   },
 
   async removeMember(id) {
@@ -75,10 +75,26 @@ export const api = {
       .order('due_at'));
   },
 
+  // Everything she has handed over, newest first.
+  async history(limit = 300) {
+    return check(await sb.from('tasks')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(limit));
+  },
+
+  // Tasks handed over in the last few days, for the weekly numbers.
+  async recentTasks(days = 7) {
+    const since = new Date(Date.now() - days * 864e5).toISOString();
+    return check(await sb.from('tasks')
+      .select('id, member_id, status, due_at, done_at, done_by, created_at')
+      .gte('created_at', since));
+  },
+
   // Past tasks she can reuse, newest first, one per title.
   async savedTasks() {
     const rows = check(await sb.from('tasks')
-      .select('title, how_to, where_is, photo_url, created_at')
+      .select('title, how_to, where_is, photo_url, audio_url, needs_photo, created_at')
       .order('created_at', { ascending: false })
       .limit(100));
     const seen = new Set();
@@ -100,11 +116,16 @@ export const api = {
     return check(await sb.from('tasks').update(patch).eq('id', id).select('*').single());
   },
 
-  async uploadPhoto(blob) {
+  // Photos and voice notes go into the uploader's own folder.
+  async uploadFile(blob, ext, contentType) {
     const { data: u } = await sb.auth.getUser();
-    const path = `${u.user.id}/${crypto.randomUUID()}.jpg`;
-    check(await sb.storage.from('task-photos').upload(path, blob, { contentType: 'image/jpeg' }));
+    const path = `${u.user.id}/${crypto.randomUUID()}.${ext}`;
+    check(await sb.storage.from('task-photos').upload(path, blob, { contentType }));
     return sb.storage.from('task-photos').getPublicUrl(path).data.publicUrl;
+  },
+
+  uploadPhoto(blob) {
+    return this.uploadFile(blob, 'jpg', 'image/jpeg');
   },
 
   // Calls onChange whenever any of her tasks change. Returns a stop function.
@@ -130,9 +151,9 @@ export const api = {
     return check(await sb.rpc('my_tasks'));
   },
 
-  async updateMyTask(taskId, action, note = null, minutes = null) {
+  async updateMyTask(taskId, action, note = null, minutes = null, photoUrl = null) {
     check(await sb.rpc('update_my_task', {
-      p_task_id: taskId, p_action: action, p_note: note, p_minutes: minutes,
+      p_task_id: taskId, p_action: action, p_note: note, p_minutes: minutes, p_photo_url: photoUrl,
     }));
   },
 };
