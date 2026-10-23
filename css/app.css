@@ -179,3 +179,4 @@ blockquote { margin: 0; padding-left: 12px; border-left: 3px solid var(--haldi);
 @media (prefers-reduced-motion: reduce) {
   #toast { transition: none; }
 }
+p.muted + form, p.muted + .stack { margin-top: 20px; }

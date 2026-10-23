@@ -14,12 +14,13 @@ export const api = {
     return data.session;
   },
 
-  async signUp(name, email, password) {
-    const data = check(await sb.auth.signUp({ email, password, options: { data: { name } } }));
+  // invite = the token from a family invite link. Without it, a new home is created.
+  async signUp(name, email, password, invite = null) {
+    const meta = invite ? { name, invite } : { name };
+    const data = check(await sb.auth.signUp({ email, password, options: { data: meta } }));
     if (!data.session) {
       throw new Error('Check your email to confirm your account, then log in.');
     }
-    await this.household(name);
     return data.session;
   },
 
@@ -31,12 +32,18 @@ export const api = {
     await sb.auth.signOut();
   },
 
-  // Returns her household, creating it if the sign-up trigger did not.
-  async household(nameIfMissing) {
-    const rows = check(await sb.from('households').select('id, owner_name').limit(1));
-    if (rows.length) return rows[0];
+  // Who is logged in: the person who runs a home, a family member, or neither yet.
+  async whoAmI() {
+    const homes = check(await sb.from('households').select('id, owner_name').limit(1));
+    if (homes.length) return { kind: 'owner', household: homes[0] };
     const { data: u } = await sb.auth.getUser();
-    const name = nameIfMissing || u.user?.user_metadata?.name || 'Me';
+    const mine = check(await sb.from('members').select('id').eq('user_id', u.user.id).limit(1));
+    if (mine.length) return { kind: 'member' };
+    return { kind: 'none', name: u.user?.user_metadata?.name || '' };
+  },
+
+  async createHousehold(name) {
+    const { data: u } = await sb.auth.getUser();
     return check(await sb.from('households')
       .insert({ owner_id: u.user.id, owner_name: name })
       .select('id, owner_name').single());
@@ -44,14 +51,14 @@ export const api = {
 
   async members() {
     return check(await sb.from('members')
-      .select('id, name, token, last_opened_at, created_at')
+      .select('id, name, token, user_id, joined_at, last_opened_at, created_at')
       .order('created_at'));
   },
 
   async addMember(householdId, name) {
     return check(await sb.from('members')
       .insert({ household_id: householdId, name })
-      .select('id, name, token, last_opened_at, created_at').single());
+      .select('id, name, token, user_id, joined_at, last_opened_at, created_at').single());
   },
 
   async removeMember(id) {
@@ -110,14 +117,22 @@ export const api = {
     return () => sb.removeChannel(channel);
   },
 
-  // Family member side: the link token is the only key.
-  async memberView(token) {
-    return check(await sb.rpc('member_view', { p_token: token }));
+  // Family member side.
+  async inviteInfo(token) {
+    return check(await sb.rpc('invite_info', { p_token: token }));
   },
 
-  async memberUpdate(token, taskId, action, note = null, minutes = null) {
-    check(await sb.rpc('member_update', {
-      p_token: token, p_task_id: taskId, p_action: action, p_note: note, p_minutes: minutes,
+  async acceptInvite(token) {
+    check(await sb.rpc('accept_invite', { p_token: token }));
+  },
+
+  async myTasks() {
+    return check(await sb.rpc('my_tasks'));
+  },
+
+  async updateMyTask(taskId, action, note = null, minutes = null) {
+    check(await sb.rpc('update_my_task', {
+      p_task_id: taskId, p_action: action, p_note: note, p_minutes: minutes,
     }));
   },
 };

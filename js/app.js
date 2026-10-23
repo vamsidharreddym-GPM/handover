@@ -1,7 +1,7 @@
 import { api } from './api.js';
 
 const app = document.getElementById('app');
-const state = { household: null, members: [], tasks: [], stopWatch: null, tick: null };
+const state = { me: null, household: null, members: [], tasks: [], stopWatch: null, tick: null };
 
 /* ---------- small helpers ---------- */
 
@@ -45,9 +45,16 @@ function toast(msg) {
   toastTimer = setTimeout(() => el.classList.remove('show'), 3200);
 }
 
-function memberLink(m) {
-  return `${location.origin}${location.pathname}#/m/${m.token}`;
-}
+const appLink = () => `${location.origin}${location.pathname}`;
+const inviteLink = (m) => `${appLink()}#/join/${m.token}`;
+const inviteText = (m) => `Hi ${m.name}, I've added you to our home on Handover. Sign up from this link to see the tasks I hand you, with the details. Tap Done when you finish.`;
+
+// Remembers an invite while someone logs in with an existing account.
+const pending = {
+  get() { try { return sessionStorage.getItem('invite'); } catch { return null; } },
+  set(t) { try { sessionStorage.setItem('invite', t); } catch { /* private mode */ } },
+  clear() { try { sessionStorage.removeItem('invite'); } catch { /* private mode */ } },
+};
 
 async function shareLink(text, url) {
   if (navigator.share) {
@@ -79,28 +86,36 @@ const nameOf = (id) => state.members.find((m) => m.id === id)?.name;
 
 /* ---------- router ---------- */
 
-const routes = {
-  '': landing,
-  login: () => authScreen('login'),
-  signup: () => authScreen('signup'),
-  home,
-  new: newTask,
-  family,
-};
+const ownerRoutes = { home, new: newTask, family };
+
+async function whoAmI() {
+  state.me = await api.whoAmI();
+  state.household = state.me.household || null;
+  return state.me;
+}
+
+// Where a logged-in person belongs.
+const startFor = (me) => (me.kind === 'owner' ? 'home' : me.kind === 'member' ? 'mine' : 'welcome');
 
 async function route() {
   stopLive();
   window.scrollTo(0, 0);
   const [path, arg] = location.hash.replace(/^#\/?/, '').split('/');
   try {
-    if (path === 'm' && arg) return await memberScreen(arg);
-    const view = routes[path] || landing;
-    const needsLogin = ['home', 'new', 'family'].includes(path);
     const session = await api.session();
-    if (needsLogin && !session) return go('login');
-    if (session && ['', 'login', 'signup'].includes(path)) return go('home');
-    if (session && !state.household) state.household = await api.household();
-    await view();
+    if (path === 'join' && arg) return await joinScreen(arg, session);
+    if (!session) {
+      if (path === 'login') return authScreen('login');
+      if (path === 'signup') return authScreen('signup');
+      if (path === '' || !path) return landing();
+      return go('login');
+    }
+    const me = state.me || await whoAmI();
+    const target = startFor(me);
+    if (me.kind === 'owner' && ownerRoutes[path]) return await ownerRoutes[path]();
+    if (path !== target) return go(target);
+    if (target === 'mine') return await mineScreen();
+    return welcomeScreen(me);
   } catch (err) {
     app.innerHTML = `<section class="screen"><h1 class="h-md">Something went wrong</h1>
       <p class="muted">${esc(err.message)}</p>
@@ -145,11 +160,11 @@ function landing() {
 
     <ol class="steps">
       <li><strong>Write it once.</strong> What to do, how you like it done, where things are kept, by when. Add a photo of the shelf if that’s easier.</li>
-      <li><strong>Send their link once.</strong> They open it, see the steps, and tap Done. If they’re stuck, they tell you from there.</li>
+      <li><strong>Invite them once.</strong> They sign up from your invite, see the steps, and tap Done. If they’re stuck, they tell you from there.</li>
       <li><strong>Stop checking.</strong> Your screen only lights up when something needs you.</li>
     </ol>
 
-    <p class="foot muted">Got a link from your family? Just open that link. You don’t need an account.</p>
+    <p class="foot muted">Invited by someone in your family? Open the invite link they sent you, or <a href="#/login">log in</a>.</p>
   </section>`;
 }
 
@@ -189,8 +204,13 @@ function authScreen(mode) {
     try {
       if (signup) await api.signUp(f.name.trim(), f.email.trim(), f.password);
       else await api.logIn(f.email.trim(), f.password);
-      state.household = await api.household();
-      go(signup ? 'family' : 'home');
+      const invite = pending.get();
+      if (invite && !signup) {
+        pending.clear();
+        try { await api.acceptInvite(invite); } catch (ex) { toast(ex.message); }
+      }
+      const me = await whoAmI();
+      go(signup && me.kind === 'owner' ? 'family' : startFor(me));
     } catch (ex) {
       err.textContent = /invalid login/i.test(ex.message) ? 'Email or password is wrong.' : ex.message;
       err.hidden = false;
@@ -261,7 +281,7 @@ function renderHome() {
   </section>`;
 
   document.getElementById('logout').onclick = async () => {
-    await api.logOut(); state.household = null; go('');
+    await api.logOut(); state.me = null; state.household = null; go('');
   };
   app.querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', onHomeAction));
 }
@@ -328,7 +348,8 @@ async function onHomeAction(e) {
   try {
     if (act === 'remind') {
       const m = state.members.find((x) => x.id === t.member_id);
-      await shareLink(`Reminder: “${t.title}” was due ${when(t.due_at)}. Tap Done here once it’s finished.`, memberLink(m));
+      if (!m.user_id) return askToSendLink(m);
+      await shareLink(`Reminder: “${t.title}” was due ${when(t.due_at)}. Please tap Done in Handover once it’s finished.`, appLink());
       return;
     }
     if (act === 'reassign') return pickPerson(t);
@@ -363,7 +384,7 @@ function pickPerson(t) {
       const m = state.members.find((x) => x.id === b.dataset.m);
       toast(`Handed over to ${m.name}.`);
       await loadHome(); renderHome();
-      if (!m.last_opened_at) askToSendLink(m);
+      if (!m.user_id) askToSendLink(m);
     } catch (err) { toast(err.message); busy(b, false); }
   }));
 }
@@ -372,14 +393,14 @@ function askToSendLink(m) {
   const sheet = document.createElement('div');
   sheet.className = 'sheet-wrap';
   sheet.innerHTML = `<div class="sheet" role="dialog" aria-label="Send link">
-    <p class="h-md">${esc(m.name)} hasn’t opened their link yet</p>
-    <p class="muted">Send it once. After that, every task you give ${esc(m.name)} shows up there.</p>
-    <button class="btn" data-send>Send ${esc(m.name)} the link</button>
+    <p class="h-md">${esc(m.name)} hasn’t joined yet</p>
+    <p class="muted">Send the invite once. When ${esc(m.name)} signs up from it, every task you hand over shows up in their account.</p>
+    <button class="btn" data-send>Send ${esc(m.name)} the invite</button>
     <button class="link" data-close>Later</button></div>`;
   document.body.appendChild(sheet);
   sheet.addEventListener('click', (e) => { if (e.target === sheet || e.target.dataset.close !== undefined) sheet.remove(); });
   sheet.querySelector('[data-send]').onclick = async () => {
-    await shareLink(`Hi ${m.name}, I’ll put home tasks for you here, with the details. Open it, and tap Done when finished. Save it to your home screen.`, memberLink(m));
+    await shareLink(inviteText(m), inviteLink(m));
     sheet.remove();
   };
 }
@@ -512,7 +533,7 @@ async function newTask() {
       const m = members.find((x) => x.id === whoBtn.dataset.who);
       toast(`Handed over to ${m.name}.`);
       go('home');
-      if (!m.last_opened_at) setTimeout(() => askToSendLink(m), 400);
+      if (!m.user_id) setTimeout(() => askToSendLink(m), 400);
     } catch (ex) { err.textContent = ex.message; err.hidden = false; busy(btn, false); }
   });
 }
@@ -544,13 +565,14 @@ async function family() {
   <section class="screen">
     <a class="back" href="#/home">Home</a>
     <h1 class="h-lg">Family</h1>
-    <p class="muted">Everyone gets their own link. They open it to see what you’ve handed them. No app or password for them.</p>
+    <p class="muted">Add the people you hand tasks to, then send each one an invite. They sign up from it and see only the tasks you give them.</p>
     <div class="list">
       ${ms.map((m) => `<div class="row">
         <div><p class="row-title">${esc(m.name)}</p>
-          <p class="row-sub">${m.last_opened_at ? `Opened their link ${ago(m.last_opened_at)}` : 'Hasn’t opened their link yet'}</p></div>
+          <p class="row-sub">${!m.user_id ? 'Invited, hasn’t joined yet'
+            : m.last_opened_at ? `Joined. Last checked tasks ${ago(m.last_opened_at)}` : 'Joined'}</p></div>
         <div class="row-actions">
-          <button class="btn btn-sm ${m.last_opened_at ? 'btn-quiet' : ''}" data-send="${m.id}">Send link</button>
+          ${m.user_id ? '' : `<button class="btn btn-sm" data-send="${m.id}">Send invite</button>`}
           <button class="link" data-rm="${m.id}" aria-label="Remove ${esc(m.name)}">Remove</button>
         </div></div>`).join('')}
     </div>
@@ -563,11 +585,11 @@ async function family() {
 
   app.querySelectorAll('[data-send]').forEach((b) => b.addEventListener('click', () => {
     const m = ms.find((x) => x.id === b.dataset.send);
-    shareLink(`Hi ${m.name}, I’ll put home tasks for you here, with the details. Open it, and tap Done when finished. Save it to your home screen.`, memberLink(m));
+    shareLink(inviteText(m), inviteLink(m));
   }));
   app.querySelectorAll('[data-rm]').forEach((b) => b.addEventListener('click', async () => {
     const m = ms.find((x) => x.id === b.dataset.rm);
-    if (!window.confirm(`Remove ${m.name}? Their link will stop working.`)) return;
+    if (!window.confirm(`Remove ${m.name}? They won’t see your tasks any more.`)) return;
     await api.removeMember(m.id);
     toast(`${m.name} removed.`);
     family();
@@ -588,24 +610,117 @@ async function family() {
 
 /* ---------- family member's screen ---------- */
 
-async function memberScreen(token) {
-  if (!/^[0-9a-f-]{36}$/i.test(token)) {
-    app.innerHTML = '<section class="screen"><h1 class="h-md">This link doesn’t look right</h1><p class="muted">Ask for the link again.</p></section>';
+// Opened from an invite link.
+async function joinScreen(token, session) {
+  const info = /^[0-9a-f-]{36}$/i.test(token) ? await api.inviteInfo(token) : null;
+  if (!info) {
+    app.innerHTML = `<section class="screen narrow"><a class="back" href="#/">Handover</a>
+      <h1 class="h-lg">This invite doesn’t work</h1>
+      <p class="muted">It may have been removed. Ask for a new invite.</p></section>`;
     return;
   }
-  const load = async () => {
-    const v = await api.memberView(token);
-    if (!v) {
-      app.innerHTML = '<section class="screen"><h1 class="h-md">This link isn’t active any more</h1><p class="muted">Ask for a new link.</p></section>';
-      return;
+  const owner = esc(info.owner_name);
+
+  if (info.joined) {
+    app.innerHTML = `<section class="screen narrow"><a class="back" href="#/">Handover</a>
+      <h1 class="h-lg">This invite has already been used</h1>
+      <p class="muted">If it was you, log in to see your tasks.</p>
+      <a class="btn" href="#/login">Log in</a></section>`;
+    return;
+  }
+
+  if (session) {
+    app.innerHTML = `<section class="screen narrow"><a class="back" href="#/">Handover</a>
+      <h1 class="h-lg">Join ${owner}’s home as ${esc(info.member_name)}?</h1>
+      <p class="error" id="err" hidden></p>
+      <button class="btn" id="accept">Join</button>
+      <button class="link" id="other">Use a different account</button></section>`;
+    document.getElementById('accept').onclick = async (e) => {
+      busy(e.target, true, 'Joining…');
+      try { await api.acceptInvite(token); state.me = null; go('mine'); } catch (ex) {
+        const err = document.getElementById('err'); err.textContent = ex.message; err.hidden = false; busy(e.target, false);
+      }
+    };
+    document.getElementById('other').onclick = async () => {
+      await api.logOut(); state.me = null; route();
+    };
+    return;
+  }
+
+  app.innerHTML = `
+  <section class="screen narrow">
+    <a class="back" href="#/">Handover</a>
+    <h1 class="h-lg">${owner} added you to their home</h1>
+    <p class="muted">Sign up to see the tasks ${owner} hands you, with the steps and where things are kept. You’ll only get the tasks meant for you.</p>
+    <form id="join" class="stack" novalidate>
+      <label>Your name<input name="name" required maxlength="40" value="${esc(info.member_name)}"></label>
+      <label>Email<input name="email" type="email" required autocomplete="email"></label>
+      <label>Password<input name="password" type="password" required minlength="6" autocomplete="new-password">
+        <span class="hint">At least 6 characters</span></label>
+      <p class="error" id="err" hidden></p>
+      <button class="btn" type="submit">Join ${owner}’s home</button>
+    </form>
+    <p class="muted center">Already have an account? <a href="#/login" id="login-instead">Log in to join</a></p>
+  </section>`;
+  document.getElementById('login-instead').onclick = () => pending.set(token);
+  const form = document.getElementById('join');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(form));
+    const err = document.getElementById('err');
+    const problem = !f.name.trim() ? 'Add your name.'
+      : !/^\S+@\S+\.\S+$/.test(f.email) ? 'Enter a valid email.'
+      : (f.password || '').length < 6 ? 'Password needs at least 6 characters.' : '';
+    if (problem) { err.textContent = problem; err.hidden = false; return; }
+    const btn = form.querySelector('button');
+    busy(btn, true, 'Joining…');
+    try {
+      await api.signUp(f.name.trim(), f.email.trim(), f.password, token);
+      state.me = null;
+      go('mine');
+    } catch (ex) {
+      err.textContent = /already registered/i.test(ex.message)
+        ? 'This email already has an account. Log in to join instead.' : ex.message;
+      err.hidden = false;
+      busy(btn, false);
     }
-    renderMember(token, v);
+  });
+}
+
+// Logged in, but neither runs a home nor has joined one (for example, an invite that was already used).
+function welcomeScreen(me) {
+  app.innerHTML = `
+  <section class="screen narrow">
+    <header class="topbar"><span class="brand">Handover</span><nav><button class="link" id="logout">Log out</button></nav></header>
+    <h1 class="h-lg">You’re not part of a home yet</h1>
+    <p class="muted">If someone in your family invited you, open their invite link again. Or start your own home to hand over tasks.</p>
+    <form id="start" class="stack">
+      <label>Your name<input name="name" required maxlength="40" value="${esc(me.name)}"></label>
+      <button class="btn" type="submit">Start my own home</button>
+    </form>
+  </section>`;
+  document.getElementById('logout').onclick = async () => { await api.logOut(); state.me = null; go(''); };
+  document.getElementById('start').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const name = e.target.name.value.trim();
+    if (!name) return;
+    await api.createHousehold(name);
+    state.me = null;
+    go('family');
+  });
+}
+
+async function mineScreen() {
+  const load = async () => {
+    const v = await api.myTasks();
+    if (!v) { state.me = null; return go('welcome'); }
+    renderMember(v);
   };
   await load();
   state.tick = setInterval(() => { if (!document.querySelector('.panel:not([hidden])')) load(); }, 60000);
 }
 
-function renderMember(token, v) {
+function renderMember(v) {
   const open = v.tasks.filter((t) => t.status === 'open');
   const cant = v.tasks.filter((t) => t.status === 'cant');
   const done = v.tasks.filter((t) => t.status === 'done');
@@ -614,7 +729,7 @@ function renderMember(token, v) {
 
   app.innerHTML = `
   <section class="screen member">
-    <header class="topbar"><span class="brand">Handover</span></header>
+    <header class="topbar"><span class="brand">Handover</span><nav><button class="link" id="logout">Log out</button></nav></header>
     <p class="hello">Hi ${esc(v.member.name)}</p>
     <h1 class="h-lg">${open.length ? `${owner} handed you ${open.length} ${open.length === 1 ? 'thing' : 'things'}` : 'Nothing for you right now'}</h1>
     ${!open.length ? `<p class="muted">When ${owner} hands you something, it shows up here.</p>` : ''}
@@ -633,12 +748,14 @@ function renderMember(token, v) {
     ${!standalone ? `<p class="tip">Tip: add this page to your home screen, so it’s one tap next time.</p>` : ''}
   </section>`;
 
+  document.getElementById('logout').onclick = async () => { await api.logOut(); state.me = null; go(''); };
+
   const act = async (btn, id, action, note, minutes, msg) => {
     busy(btn, true, '…');
     try {
-      await api.memberUpdate(token, id, action, note, minutes);
+      await api.updateMyTask(id, action, note, minutes);
       toast(msg);
-      renderMember(token, await api.memberView(token));
+      renderMember(await api.myTasks());
     } catch (ex) { toast(ex.message); busy(btn, false); }
   };
 

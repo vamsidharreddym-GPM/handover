@@ -12,15 +12,19 @@ create table if not exists public.households (
   created_at  timestamptz not null default now()
 );
 
--- Family members she hands tasks to. Each one gets a private link (token).
+-- Family members she hands tasks to. Each one gets an invite (token) and joins with their own account.
 create table if not exists public.members (
   id              uuid primary key default gen_random_uuid(),
   household_id    uuid not null references public.households(id) on delete cascade,
   name            text not null check (char_length(name) between 1 and 40),
   token           uuid not null unique default gen_random_uuid(),
+  user_id         uuid unique references auth.users(id) on delete set null,
+  joined_at       timestamptz,
   last_opened_at  timestamptz,
   created_at      timestamptz not null default now()
 );
+alter table public.members add column if not exists user_id uuid unique references auth.users(id) on delete set null;
+alter table public.members add column if not exists joined_at timestamptz;
 
 create table if not exists public.tasks (
   id            uuid primary key default gen_random_uuid(),
@@ -56,10 +60,18 @@ drop trigger if exists tasks_touch on public.tasks;
 create trigger tasks_touch before update on public.tasks
   for each row execute function public.touch_updated_at();
 
--- Create the household as soon as someone signs up.
+-- On sign-up: someone with an invite joins that household as a family member.
+-- Everyone else gets their own household.
 create or replace function public.handle_new_user() returns trigger
 language plpgsql security definer set search_path = public as $$
+declare
+  invite text := new.raw_user_meta_data->>'invite';
 begin
+  if invite ~* '^[0-9a-f-]{36}$' then
+    update public.members set user_id = new.id, joined_at = now()
+      where token = invite::uuid and user_id is null;
+    return new;
+  end if;
   insert into public.households (owner_id, owner_name)
   values (new.id, left(coalesce(nullif(trim(new.raw_user_meta_data->>'name'), ''), 'Me'), 40))
   on conflict (owner_id) do nothing;
@@ -91,6 +103,11 @@ create policy members_owner on public.members
   using (household_id = public.my_household())
   with check (household_id = public.my_household());
 
+drop policy if exists members_self on public.members;
+create policy members_self on public.members
+  for select to authenticated
+  using (user_id = auth.uid());
+
 drop policy if exists tasks_owner on public.tasks;
 create policy tasks_owner on public.tasks
   for all to authenticated
@@ -102,17 +119,44 @@ create policy tasks_owner on public.tasks
       where m.id = member_id and m.household_id = public.my_household()))
   );
 
--- Family members never log in with email. Their private link is the key, and they can
--- only reach the two functions below, which check the link before touching anything.
+-- Family members sign in with their own account. They can't write to tables directly:
+-- they see and update only their own tasks, through the functions below.
 
-create or replace function public.member_view(p_token uuid) returns json
+-- Shown on the invite page before sign-up: who invited you, and under what name.
+create or replace function public.invite_info(p_token uuid) returns json
+language sql stable security definer set search_path = public as $$
+  select json_build_object('member_name', m.name, 'owner_name', h.owner_name, 'joined', m.user_id is not null)
+  from public.members m join public.households h on h.id = m.household_id
+  where m.token = p_token
+$$;
+
+-- For someone who already has an account and opens an invite.
+create or replace function public.accept_invite(p_token uuid) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'Log in first'; end if;
+  if exists (select 1 from public.households where owner_id = auth.uid()) then
+    raise exception 'This account already runs a home. Use a different email to join as family.';
+  end if;
+  if exists (select 1 from public.members where user_id = auth.uid() and token <> p_token) then
+    raise exception 'This account has already joined another home.';
+  end if;
+  update public.members set user_id = auth.uid(), joined_at = coalesce(joined_at, now())
+    where token = p_token and (user_id is null or user_id = auth.uid());
+  if not found then raise exception 'This invite has already been used.'; end if;
+end $$;
+
+drop function if exists public.member_view(uuid);
+drop function if exists public.member_update(uuid, uuid, text, text, int);
+
+create or replace function public.my_tasks() returns json
 language plpgsql security definer set search_path = public as $$
 declare
   m public.members;
   h public.households;
   result json;
 begin
-  select * into m from public.members where token = p_token;
+  select * into m from public.members where user_id = auth.uid();
   if not found then
     return null;
   end if;
@@ -139,8 +183,8 @@ begin
   return result;
 end $$;
 
-create or replace function public.member_update(
-  p_token uuid, p_task_id uuid, p_action text, p_note text default null, p_minutes int default null
+create or replace function public.update_my_task(
+  p_task_id uuid, p_action text, p_note text default null, p_minutes int default null
 ) returns void
 language plpgsql security definer set search_path = public as $$
 declare
@@ -148,9 +192,9 @@ declare
   t public.tasks;
   note text := nullif(left(trim(coalesce(p_note, '')), 200), '');
 begin
-  select * into m from public.members where token = p_token;
+  select * into m from public.members where user_id = auth.uid();
   if not found then
-    raise exception 'This link is no longer active';
+    raise exception 'You are not part of a home any more';
   end if;
 
   select * into t from public.tasks where id = p_task_id and member_id = m.id for update;
@@ -191,10 +235,14 @@ begin
   end if;
 end $$;
 
-revoke all on function public.member_view(uuid) from public;
-revoke all on function public.member_update(uuid, uuid, text, text, int) from public;
-grant execute on function public.member_view(uuid) to anon, authenticated;
-grant execute on function public.member_update(uuid, uuid, text, text, int) to anon, authenticated;
+revoke all on function public.invite_info(uuid) from public;
+revoke all on function public.accept_invite(uuid) from public;
+revoke all on function public.my_tasks() from public;
+revoke all on function public.update_my_task(uuid, text, text, int) from public;
+grant execute on function public.invite_info(uuid) to anon, authenticated;
+grant execute on function public.accept_invite(uuid) to authenticated;
+grant execute on function public.my_tasks() to authenticated;
+grant execute on function public.update_my_task(uuid, text, text, int) to authenticated;
 
 -- Photos of where things are kept. Public bucket, file names are random.
 -- Only a signed-in account holder can upload, and only into her own folder.
