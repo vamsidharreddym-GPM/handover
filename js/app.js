@@ -81,7 +81,8 @@ function stopLive() {
   if (state.tick) { clearInterval(state.tick); state.tick = null; }
 }
 
-const isOverdue = (t) => t.status === 'open' && new Date(t.due_at) < new Date();
+const isNotice = (t) => t.kind === 'notice';
+const isOverdue = (t) => t.status === 'open' && !isNotice(t) && new Date(t.due_at) < new Date();
 const nameOf = (id) => state.members.find((m) => m.id === id)?.name;
 
 /* ---------- router ---------- */
@@ -381,7 +382,7 @@ function trackRow(t) {
   return `<details class="row-x">
     <summary class="row">
       <div><p class="row-title">${esc(t.title)}</p>
-        <p class="row-sub">${esc(nameOf(t.member_id))}, by ${when(t.due_at)}${moved ? ' (moved)' : ''}${t.needs_photo ? ', photo asked' : ''}</p>
+        <p class="row-sub">${isNotice(t) ? `Message to ${esc(nameOf(t.member_id))}` : `${esc(nameOf(t.member_id))}, by ${when(t.due_at)}${moved ? ' (moved)' : ''}${t.needs_photo ? ', photo asked' : ''}`}</p>
         ${moved && t.member_note ? `<p class="row-note">“${esc(t.member_note)}”</p>` : ''}</div>
       <span class="pill ${t.seen_at ? 'pill-seen' : ''}">${t.seen_at ? 'Seen' : 'Not opened'}</span>
     </summary>
@@ -397,12 +398,12 @@ function trackRow(t) {
 
 function doneRow(t) {
   const by = t.done_by === 'owner' ? 'You' : esc(nameOf(t.member_id) || 'Done');
-  const proof = t.done_photo_url ? ', with photo' : '';
+  const proof = isNotice(t) ? ' got it' : t.done_photo_url ? ', with photo' : '';
   return `<details class="row-x">
     <summary class="row"><div><p class="row-title">${esc(t.title)}</p>
-      <p class="row-sub">${by}, ${when(t.done_at)}${proof}</p></div><span class="tick" aria-label="Done">✓</span></summary>
+      <p class="row-sub">${isNotice(t) ? `${by} got it, ${when(t.done_at)}` : `${by}, ${when(t.done_at)}${proof}`}</p></div><span class="tick" aria-label="Done">✓</span></summary>
     <div class="row-more">${doneProof(t)}${details(t)}
-      ${t.done_by === 'member' ? `<div class="actions"><button class="link" data-open-panel="sendback">Not right? Send it back</button></div>
+      ${t.done_by === 'member' && !isNotice(t) ? `<div class="actions"><button class="link" data-open-panel="sendback">Not right? Send it back</button></div>
       ${notePanel('sendback', t, 'What needs fixing', 'The towels are still on the bed.', `Send back to ${esc(nameOf(t.member_id))}`)}` : ''}
     </div>
   </details>`;
@@ -520,8 +521,8 @@ function toLocalInput(d) {
 // Common home tasks, from what testers said they hand over most. One tap fills the form.
 const PRESETS = [
   { icon: '🛒', title: 'Pick up groceries', label: 'What to buy', hint: '2 packets milk, 1 kg tomatoes, coriander, 6 eggs' },
-  { icon: '🍱', title: 'Order food, I’ll be late', label: 'What to order', hint: 'Dinner for 3 from the usual place. I’ll be home by 10.' },
-  { icon: '🍳', title: 'Cook for yourselves, I’ll be late', label: 'What to make', hint: 'Dal and rice. Rice is in the steel dabba, cooker on 3 whistles.' },
+  { icon: '🍱', title: 'I’ll be late, please order food', kind: 'notice', label: 'Message', hint: 'Home by 10. Order from the usual place.' },
+  { icon: '🍳', title: 'I’ll be late, please cook for yourselves', kind: 'notice', label: 'Message', hint: 'Rice is in the steel dabba, dal is in the fridge.' },
   { icon: '🛍️', title: 'Get items on the way home', label: 'What to get', hint: 'Bread, 1 litre milk, curd from the corner shop' },
   { icon: '🧺', title: 'Put clothes in the washing machine', label: 'How', hint: 'Whites separately. Quick wash. Detergent is on the top shelf.' },
   { icon: '👕', title: 'Dry the clothes', label: 'How', hint: 'Towels on the balcony line, shirts on hangers.' },
@@ -549,6 +550,7 @@ async function newTask() {
   const own = saved.filter((s) => !presetTitles.has(s.title.trim().toLowerCase()));
   let photoUrl = null;
   let audioUrl = null;
+  let kind = 'task';
 
   app.innerHTML = `
   <section class="screen with-bar">
@@ -565,17 +567,23 @@ async function newTask() {
       <label>What needs doing<input name="title" required maxlength="80" placeholder="Or type your own task"></label>
       <label><span class="lbl"><span id="how-label">Details</span><span class="opt">optional</span></span>
         <textarea name="how_to" maxlength="600" rows="3" placeholder="How you like it done, or a list"></textarea></label>
-      <label><span class="lbl">Where things are kept<span class="opt">optional</span></span>
-        <textarea name="where_is" maxlength="300" rows="2" placeholder="Pegs are in the blue tub under the sink."></textarea></label>
+      <details class="more" id="more">
+        <summary>Add where things are kept, a voice note or a photo</summary>
+        <div class="stack">
+          <label><span class="lbl">Where things are kept<span class="opt">optional</span></span>
+            <textarea name="where_is" maxlength="300" rows="2" placeholder="Pegs are in the blue tub under the sink."></textarea></label>
+          <div class="media-row">
+            <button type="button" class="btn btn-quiet btn-sm" id="rec">Record a voice note</button>
+            <label class="btn btn-quiet btn-sm file-btn">Add a photo<input type="file" name="photo" accept="image/*" hidden></label>
+          </div>
+          <div id="voice-preview"></div>
+          <div id="photo-preview"></div>
+        </div>
+      </details>
 
-      <div class="media-row">
-        <button type="button" class="btn btn-quiet btn-sm" id="rec">Record a voice note</button>
-        <label class="btn btn-quiet btn-sm file-btn">Add a photo<input type="file" name="photo" accept="image/*" hidden></label>
-      </div>
-      <div id="voice-preview"></div>
-      <div id="photo-preview"></div>
+      <p class="notice-hint" id="notice-hint" hidden>This is a message, not a task: no deadline or photo. They tap “Got it”, and you’ll see they got it.</p>
 
-      <fieldset><legend>By when</legend>
+      <fieldset id="due-box"><legend>By when</legend>
         <div class="chips" id="due-chips">
           ${opts.map(([label, d], i) => `<button type="button" class="chip ${i === 0 ? 'on' : ''}" data-due="${d.toISOString()}">${label}</button>`).join('')}
           <button type="button" class="chip" data-due="custom">Pick a time</button>
@@ -590,7 +598,7 @@ async function newTask() {
         </div>
       </fieldset>
 
-      <label class="check"><input type="checkbox" name="needs_photo"> Ask for a photo when it’s done</label>
+      <label class="check" id="photo-ask"><input type="checkbox" name="needs_photo"> Ask for a photo when it’s done</label>
 
       <p class="error" id="err" hidden></p>
       <div class="bar"><button class="btn" type="submit">Hand it over</button></div>
@@ -623,27 +631,42 @@ async function newTask() {
     document.getElementById('rm-voice')?.addEventListener('click', () => { audioUrl = null; showVoice(null); });
   };
 
-  const fill = (title, how, where, label, hint) => {
+  const setKind = (k) => {
+    kind = k || 'task';
+    const notice = kind === 'notice';
+    document.getElementById('due-box').hidden = notice;
+    document.getElementById('photo-ask').hidden = notice;
+    document.getElementById('notice-hint').hidden = !notice;
+    form.querySelector('[type=submit]').textContent = notice ? 'Send message' : 'Hand it over';
+    if (notice) form.needs_photo.checked = false;
+  };
+  const fill = (title, how, where, label, hint, k) => {
     form.title.value = title;
     form.how_to.value = how || '';
     form.where_is.value = where || '';
     howLabel.textContent = label || 'Details';
     form.how_to.placeholder = hint || 'How you like it done, or a list';
+    setKind(k);
+    if (where) document.getElementById('more').open = true;
   };
 
   app.querySelectorAll('[data-preset]').forEach((b) => b.addEventListener('click', () => {
     const p = PRESETS[Number(b.dataset.preset)];
     app.querySelectorAll('.preset').forEach((x) => x.classList.remove('on'));
     b.classList.add('on');
-    fill(p.title, '', '', p.label, p.hint);
+    fill(p.title, '', '', p.label, p.hint, p.kind);
+    photoUrl = null; showPhoto(null);
+    audioUrl = null; showVoice(null);
+    form.needs_photo.checked = false;
     form.how_to.focus();
   }));
 
   app.querySelectorAll('[data-saved]').forEach((c) => c.addEventListener('click', () => {
     const s = own[Number(c.dataset.saved)];
-    fill(s.title, s.how_to, s.where_is);
+    fill(s.title, s.how_to, s.where_is, null, null, s.kind);
     photoUrl = s.photo_url || null; showPhoto(photoUrl);
     audioUrl = s.audio_url || null; showVoice(audioUrl);
+    if (photoUrl || audioUrl) document.getElementById('more').open = true;
     form.needs_photo.checked = !!s.needs_photo;
     toast('Filled in from last time. Change anything you need.');
   }));
@@ -651,9 +674,10 @@ async function newTask() {
   const pre = takePrefill();
   if (pre) {
     const p = PRESETS.find((x) => x.title === pre.title);
-    fill(pre.title, pre.how_to, pre.where_is, p?.label, p?.hint);
+    fill(pre.title, pre.how_to, pre.where_is, p?.label, p?.hint, pre.kind);
     photoUrl = pre.photo_url || null; showPhoto(photoUrl);
     audioUrl = pre.audio_url || null; showVoice(audioUrl);
+    if (photoUrl || audioUrl) document.getElementById('more').open = true;
     form.needs_photo.checked = !!pre.needs_photo;
     if (pre.member_id) {
       const c = whoChips.querySelector(`[data-who="${pre.member_id}"]`);
@@ -681,6 +705,7 @@ async function newTask() {
     const whoBtn = whoChips.querySelector('.on');
     let due = dueBtn?.dataset.due;
     if (due === 'custom') due = custom.value ? new Date(custom.value).toISOString() : null;
+    if (kind === 'notice') due = new Date(Date.now() + 12 * 3600000).toISOString();
     const problem = !title ? 'Pick a common task or write what needs doing.'
       : !due ? 'Pick when it should be done by.'
       : new Date(due) < new Date() ? 'That time has already passed.'
@@ -697,11 +722,12 @@ async function newTask() {
         where_is: form.where_is.value.trim() || null,
         photo_url: photoUrl,
         audio_url: audioUrl,
-        needs_photo: form.needs_photo.checked,
+        needs_photo: kind === 'notice' ? false : form.needs_photo.checked,
+        kind,
         due_at: due,
       });
       const m = members.find((x) => x.id === whoBtn.dataset.who);
-      toast(`Handed over to ${m.name}.`);
+      toast(kind === 'notice' ? `Message sent to ${m.name}.` : `Handed over to ${m.name}.`);
       go('home');
       if (!m.user_id) setTimeout(() => askToSendLink(m), 400);
     } catch (ex) { err.textContent = ex.message; err.hidden = false; busy(btn, false); }
@@ -867,7 +893,7 @@ async function history() {
       try {
         sessionStorage.setItem('prefill', JSON.stringify({
           title: t.title, how_to: t.how_to, where_is: t.where_is, photo_url: t.photo_url,
-          audio_url: t.audio_url, needs_photo: t.needs_photo, member_id: t.member_id,
+          audio_url: t.audio_url, needs_photo: t.needs_photo, member_id: t.member_id, kind: t.kind,
         }));
       } catch { /* private mode */ }
       go('new');
@@ -887,7 +913,8 @@ function dayLabel(iso) {
 
 function historyRow(t) {
   const name = esc(nameOf(t.member_id) || 'No one');
-  const outcome = t.status === 'done'
+  const outcome = t.status === 'done' && isNotice(t) ? `Message. ${name} got it, ${when(t.done_at)}`
+    : t.status === 'done'
     ? `${t.done_by === 'owner' ? 'You did it' : `${name} did it`}, ${when(t.done_at)}${t.done_at > t.due_at ? ' (late)' : ''}`
     : t.status === 'cant' ? `${name} couldn’t: “${esc(t.member_note || '')}”`
     : t.status === 'cancelled' ? 'Dropped'
@@ -1036,7 +1063,7 @@ function renderMember(v) {
 
     ${done.length ? `<h2 class="list-head">Done</h2><div class="list">${done.map((t) => `<div class="row">
       <div><p class="row-title">${esc(t.title)}</p><p class="row-sub">${when(t.done_at)}${t.done_photo_url ? ', photo sent' : ''}</p></div>
-      ${Date.now() - new Date(t.done_at) < 15 * 60000 ? `<button class="link" data-undo="${t.id}">Undo</button>` : '<span class="tick">✓</span>'}
+      ${Date.now() - new Date(t.done_at) < 5 * 60000 ? `<button class="link" data-undo="${t.id}">Undo (5 min)</button>` : '<span class="tick">✓</span>'}
       </div>`).join('')}</div>` : ''}
 
     ${!standalone ? `<p class="tip">Tip: add this page to your home screen, so it’s one tap next time.</p>` : ''}
@@ -1056,7 +1083,7 @@ function renderMember(v) {
   app.querySelectorAll('[data-done]').forEach((b) => b.addEventListener('click', () => {
     const t = open.find((x) => x.id === b.dataset.done);
     if (!t.needs_photo) {
-      act(b, t.id, 'done', null, null, `Done. ${v.owner_name} will see it.`);
+      act(b, t.id, 'done', null, null, isNotice(t) ? `${v.owner_name} will know you got it.` : `Done. ${v.owner_name} will see it.`);
       return;
     }
     // She asked for a photo: open the camera, then mark done with it.
@@ -1098,7 +1125,18 @@ function renderMember(v) {
   }));
 }
 
+function noticeCard(t, owner) {
+  return `<article class="card card-notice">
+    <p class="who">Message from ${owner}</p>
+    <p class="card-title">${esc(t.title)}</p>
+    ${t.how_to ? `<p class="detail">${esc(t.how_to)}</p>` : ''}
+    ${details({ ...t, how_to: null })}
+    <button class="btn" data-done="${t.id}">Got it</button>
+  </article>`;
+}
+
 function memberCard(t, owner) {
+  if (isNotice(t)) return noticeCard(t, owner);
   const late = new Date(t.due_at) < new Date();
   const note = t.owner_note
     ? `<p class="note-from"><span>${t.sent_back_count ? `${owner} sent this back` : `Note from ${owner}`}, ${ago(t.owner_note_at)}</span>${esc(t.owner_note)}</p>` : '';

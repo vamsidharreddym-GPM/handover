@@ -54,6 +54,9 @@ alter table public.tasks add column if not exists done_photo_url text check (cha
 alter table public.tasks add column if not exists owner_note text check (char_length(owner_note) <= 300);
 alter table public.tasks add column if not exists owner_note_at timestamptz;
 alter table public.tasks add column if not exists sent_back_count int not null default 0;
+-- Added after the watched session (24 Oct): a 'notice' is a heads-up like "I'll be late, order food".
+-- No deadline or photo; the family member just taps Got it.
+alter table public.tasks add column if not exists kind text not null default 'task' check (kind in ('task','notice'));
 
 create index if not exists tasks_household_idx on public.tasks (household_id, status, due_at);
 create index if not exists tasks_member_idx on public.tasks (member_id, status);
@@ -184,7 +187,7 @@ begin
       from (
         select id, title, how_to, where_is, photo_url, audio_url, due_at, first_due_at,
                status, member_note, done_at, needs_photo, done_photo_url,
-               owner_note, owner_note_at, sent_back_count
+               owner_note, owner_note_at, sent_back_count, kind
         from public.tasks
         where member_id = m.id
           and (status in ('open','cant')
@@ -230,7 +233,7 @@ begin
       set status = 'done', done_at = now(), done_by = 'member', done_photo_url = p_photo_url
       where id = t.id;
   elsif p_action = 'undo' then
-    if t.status <> 'done' or t.done_at < now() - interval '15 minutes' then
+    if t.status <> 'done' or t.done_at < now() - interval '5 minutes' then
       raise exception 'This can no longer be undone';
     end if;
     update public.tasks set status = 'open', done_at = null, done_by = null, done_photo_url = null where id = t.id;

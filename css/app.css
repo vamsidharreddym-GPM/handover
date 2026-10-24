@@ -215,3 +215,11 @@ select { font: 400 17px/1.4 var(--body); color: var(--ink); padding: 12px 10px; 
 .pill-done { background: #e3f1e9; color: var(--leaf); }
 .pill-cant { background: var(--haldi-wash); color: #7a5600; }
 .pill-cancelled { text-decoration: line-through; }
+
+/* after the watched session */
+.more { border: 1.5px dashed var(--line); border-radius: 12px; padding: 12px 14px; }
+.more summary { cursor: pointer; font-weight: 600; font-size: 16px; }
+.more[open] summary { margin-bottom: 12px; }
+.notice-hint { background: var(--wash); border-radius: 10px; padding: 10px 12px; font-size: 15px; }
+.card-notice { border-color: var(--ink); background: var(--wash); }
+[hidden] { display: none !important; }
